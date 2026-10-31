@@ -56,23 +56,31 @@ Better still, record a dry DI track of your own bass (any WAV: 16/24/32-bit or f
 You need the ARM toolchain and Electro-Smith's two libraries:
 
 ```bash
-brew install --cask gcc-arm-embedded
+brew install --cask gcc-arm-embedded      # asks for your password (pkg installer)
 brew install dfu-util
-git submodule add https://github.com/electro-smith/libDaisy lib/libDaisy
-git submodule add https://github.com/electro-smith/DaisySP lib/DaisySP
+git submodule update --init --recursive   # libDaisy + DaisySP in lib/
 make -C lib/libDaisy && make -C lib/DaisySP
 ```
 
 Then:
 
 ```bash
-make -C firmware                 # build
+make -C firmware                 # build → firmware/build/daisy-bass.bin
 make -C firmware program-dfu     # flash: hold BOOT, tap RESET on the Seed first
 ```
 
 You can also flash `firmware/build/daisy-bass.bin` with Electro-Smith's [web programmer](https://electro-smith.github.io/Programmer/).
 
-**First flash:** uncomment `#define KNOB_CHECK` in `firmware/main.cpp`, flash, and open a serial monitor (`screen /dev/tty.usbmodem* 115200`). Turn each pot and flip each switch to confirm the mapping in `firmware/terrarium.h` matches your board, then comment it out again.
+**First flash:** build the control-mapping diagnostic, flash it, and open a serial monitor:
+
+```bash
+make -C firmware clean && make -C firmware KNOB_CHECK=1 && make -C firmware program-dfu
+screen /dev/tty.usbmodem* 115200
+```
+
+Turn each pot and flip each switch to confirm the mapping in `firmware/terrarium.h` matches your board. Then rebuild normally with `make -C firmware clean && make -C firmware`.
+
+**Flash budget:** the Seed's internal flash is 128 KB and this build uses about 100 KB (77%). Before adding several more effects, switch to Electro-Smith's bootloader (`APP_TYPE = BOOT_SRAM` in `firmware/Makefile`), which allows programs of roughly 480 KB.
 
 ## Building the Terrarium (125B)
 

@@ -20,8 +20,8 @@
 
 namespace terrarium {
 
-// Index into DaisyPetal::switches[].
-enum Switch {
+// Index into DaisyPetal::switches[]. (Not "Switch": that's a libDaisy class.)
+enum Control {
     FOOTSWITCH_1 = 4,
     FOOTSWITCH_2 = 5,
     SWITCH_1 = 2,

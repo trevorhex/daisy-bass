@@ -16,9 +16,8 @@
 #include "dsp/EnvelopeFilter.h"
 #include "terrarium.h"
 
-// Uncomment to stream pot/switch readings over USB serial instead of
-// processing audio, to verify the control mapping on your board.
-// #define KNOB_CHECK
+// Build with `make clean && make KNOB_CHECK=1` to stream pot/switch readings
+// over USB serial instead of processing audio, to verify the control mapping.
 
 using namespace daisy;
 using namespace terrarium;
@@ -33,7 +32,7 @@ GPIO led1, led2;
 volatile bool bypassed = false;
 
 float Pot(int n) { return hw.GetKnobValue(POTS[n]); }
-bool Toggle(Switch s) { return hw.switches[s].Pressed(); }
+bool Toggle(Control c) { return hw.switches[c].Pressed(); }
 
 // Runs every block (48 samples = 1 ms). Must never block or allocate.
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
