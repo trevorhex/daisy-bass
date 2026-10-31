@@ -1,0 +1,4 @@
+build/
+firmware/build/
+renders/
+.DS_Store
