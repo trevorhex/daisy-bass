@@ -3,6 +3,7 @@
 //   bassfx --demo renders/riff.wav                 # write a synthetic bass riff
 //   bassfx renders/riff.wav renders/wah.wav --sens 0.7 --res 0.6
 //   afplay renders/wah.wav
+//   bassfx --tune renders/riff.wav                 # run the tuner over a file
 
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,7 @@
 #include <string>
 
 #include "../dsp/EnvelopeFilter.h"
+#include "../dsp/Tuner.h"
 #include "TestSignal.h"
 #include "Wav.h"
 
@@ -19,6 +21,7 @@ void Usage() {
     std::puts(
         "usage: bassfx <in.wav> <out.wav> [options]\n"
         "       bassfx --demo <out.wav>          write a synthetic bass riff\n"
+        "       bassfx --tune <in.wav> [a4]      print what the tuner hears (default A4 = 440)\n"
         "\n"
         "Knobs (0..1, like the pedal's pots):\n"
         "  --sens   <v>   sensitivity        (default 0.5)\n"
@@ -33,6 +36,35 @@ void Usage() {
         "  --full-range   filter the lows too (no clean-low crossover)\n"
         "  --xover <hz>   crossover frequency (default 150)\n"
         "  --block <n>    block size, like the pedal's audio callback (default 48)");
+}
+
+/** Runs the tuner like the pedal does: push every block, analyze ~20×/second. */
+int Tune(const char* path, float a4) {
+    const wav::Audio audio = wav::Read(path);
+    bass::Tuner tuner;
+    tuner.Init(audio.sampleRate, a4);
+
+    const size_t block = 48;
+    const size_t analyzeEvery = size_t(audio.sampleRate * 0.05f);
+    int lastNote = -1;
+    for (size_t start = 0, next = analyzeEvery; start < audio.samples.size(); start += block) {
+        const size_t n = std::min(block, audio.samples.size() - start);
+        tuner.Push(audio.samples.data() + start, n);
+        if (start < next) continue;
+        next += analyzeEvery;
+
+        const bass::Tuner::Reading r = tuner.Analyze();
+        if (!r.valid) {
+            lastNote = -1;
+            continue;
+        }
+        if (r.midiNote == lastNote) continue; // print each new note once
+        lastNote = r.midiNote;
+        std::printf("%6.2fs  %-2s%d  %+6.1f cents  %7.2f Hz  clarity %.2f\n",
+                    double(start / audio.sampleRate), r.NoteName(), r.Octave(), double(r.cents),
+                    double(r.frequency), double(r.clarity));
+    }
+    return 0;
 }
 
 float Arg(int& i, int argc, char** argv) {
@@ -51,6 +83,15 @@ int main(int argc, char** argv) {
         wav::Write(argv[2], audio);
         std::printf("wrote %s (%.1f s)\n", argv[2], double(audio.samples.size() / audio.sampleRate));
         return 0;
+    }
+
+    if (argc >= 3 && !std::strcmp(argv[1], "--tune")) {
+        try {
+            return Tune(argv[2], argc >= 4 ? std::strtof(argv[3], nullptr) : 440.f);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: %s\n", e.what());
+            return 1;
+        }
     }
 
     if (argc < 3) {

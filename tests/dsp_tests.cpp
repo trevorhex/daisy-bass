@@ -1,59 +1,20 @@
-// Plain C++ tests for the DSP. No framework: each CHECK prints on failure,
-// and the exit code is the number of failures.
-
 #include <cmath>
 #include <cstdio>
-#include <functional>
 #include <vector>
 
 #include "../desktop/TestSignal.h"
 #include "../desktop/Wav.h"
+#include "../dsp/Chain.h"
 #include "../dsp/Crossover.h"
 #include "../dsp/EnvelopeFilter.h"
 #include "../dsp/EnvelopeFollower.h"
 #include "../dsp/Svf.h"
+#include "Harness.h"
 
 using namespace bass;
+using namespace harness;
 
-namespace {
-
-int failures = 0;
-const char* current = "";
-
-#define CHECK(cond)                                                                    \
-    do {                                                                               \
-        if (!(cond)) {                                                                 \
-            std::printf("  FAIL [%s] %s:%d  %s\n", current, __FILE__, __LINE__, #cond); \
-            failures++;                                                                \
-        }                                                                              \
-    } while (0)
-
-constexpr float kRate = 48000.f;
-constexpr float kPi = 3.14159265f;
-
-/** RMS of a process run on a sine, skipping the first half to let things settle. */
-float SineRms(float freq, const std::function<float(float)>& process, float seconds = 0.5f) {
-    const size_t n = size_t(seconds * kRate);
-    double sum = 0;
-    for (size_t i = 0; i < n; i++) {
-        const float y = process(std::sin(2.f * kPi * freq * i / kRate));
-        if (i >= n / 2) sum += double(y * y);
-    }
-    return float(std::sqrt(sum / (n - n / 2)));
-}
-
-float Db(float ratio) { return 20.f * std::log10(ratio); }
-
-void Test(const char* name, const std::function<void()>& body) {
-    current = name;
-    const int before = failures;
-    body();
-    std::printf("%s %s\n", failures == before ? "  ok  " : "  FAIL", name);
-}
-
-} // namespace
-
-int main() {
+void RunDspTests() {
     const float sineRms = 1.f / std::sqrt(2.f);
 
     Test("svf low-pass passes lows and cuts highs", [&] {
@@ -62,7 +23,7 @@ int main() {
         f.SetParams(500.f, 0.707f);
         CHECK(std::fabs(Db(SineRms(50.f, [&](float x) { return f.Process(x).low; }) / sineRms)) < 0.5f);
         f.Reset();
-        // 2nd order: about -24 dB two octaves up... at 3 octaves expect well under -30 dB.
+        // 2nd order, 3 octaves above cutoff: expect well under -30 dB.
         CHECK(Db(SineRms(4000.f, [&](float x) { return f.Process(x).low; }) / sineRms) < -30.f);
     });
 
@@ -72,7 +33,7 @@ int main() {
         float peak = 0.f;
         for (int i = 0; i < 48000; i++) {
             f.SetParams((i % 2) ? 40.f : 15000.f, 12.f);
-            peak = std::fmax(peak, std::fabs(f.Process(std::sin(i * 0.05f)).low));
+            peak = std::fmax(peak, std::fabs(f.Process(std::sin(float(i) * 0.05f)).low));
         }
         CHECK(std::isfinite(peak));
         CHECK(peak < 50.f);
@@ -100,27 +61,24 @@ int main() {
         CHECK(e.Value() > 0.85f);
     });
 
-    Test("bypass and dry mix pass the input through untouched", [&] {
-        for (int which = 0; which < 2; which++) {
-            EnvelopeFilter fx;
-            EnvelopeFilter::Params p;
-            (which ? p.mix : p.level) = which ? 0.f : 0.5f;
-            p.bypass = which == 0;
-            fx.Init(kRate);
-            fx.SetParams(p, true);
-            float maxDiff = 0.f;
-            for (int i = 0; i < 4800; i++) {
-                const float x = 0.5f * std::sin(i * 0.01f);
-                maxDiff = std::fmax(maxDiff, std::fabs(fx.Process(x) - x));
-            }
-            CHECK(maxDiff < 1e-4f);
+    Test("dry mix at unity level passes the input through", [&] {
+        EnvelopeFilter fx;
+        EnvelopeFilter::Params p;
+        p.mix = 0.f;
+        fx.Init(kRate);
+        fx.SetParams(p, true);
+        float maxDiff = 0.f;
+        for (int i = 0; i < 4800; i++) {
+            const float x = 0.5f * std::sin(float(i) * 0.01f);
+            maxDiff = std::fmax(maxDiff, std::fabs(fx.Process(x) - x));
         }
+        CHECK(maxDiff < 1e-4f);
     });
 
     Test("clean-lows keeps the fundamental while the filter works the highs", [&] {
         EnvelopeFilter::Params p;
-        p.range = 0.f;        // filter parked low...
-        p.sensitivity = 0.f;  // ...and barely moving
+        p.range = 0.f;       // filter parked low...
+        p.sensitivity = 0.f; // ...and barely moving
         p.resonance = 0.f;
         p.cleanLows = true;
 
@@ -139,7 +97,7 @@ int main() {
             EnvelopeFilter fx;
             fx.Init(kRate);
             fx.SetParams(p, true);
-            // 2 kHz content riding on the note: how much survives tells us where the cutoff is.
+            // How much 2 kHz survives tells us where the cutoff is.
             return SineRms(2000.f, [&](float x) { return fx.Process(amplitude * x); }) / amplitude;
         };
         CHECK(highsFor(0.6f) > 4.f * highsFor(0.02f));
@@ -164,6 +122,54 @@ int main() {
         }
     });
 
+    Test("effect interface round-trips every parameter", [&] {
+        EnvelopeFilter fx;
+        fx.Init(kRate);
+        Effect& e = fx;
+        CHECK(e.NumParams() == 10);
+        for (int i = 0; i < e.NumParams(); i++) {
+            const ParamInfo info = e.Param(i);
+            const float v = info.isSwitch ? 1.f : 0.73f;
+            e.SetParam(i, v);
+            CHECK_NEAR(e.GetParam(i), v, 1e-6f);
+        }
+        CHECK(fx.GetParams().mode == EnvelopeFilter::Mode::BandPass);
+        CHECK(fx.GetParams().crossoverHz == 250.f);
+        e.ResetParams();
+        for (int i = 0; i < e.NumParams(); i++) CHECK_NEAR(e.GetParam(i), e.Param(i).defaultValue, 1e-6f);
+    });
+
+    Test("chain bypass is transparent and switches without clicks", [&] {
+        EnvelopeFilter fx;
+        Chain chain;
+        chain.Add(&fx, /*enabled=*/false);
+        chain.Init(kRate);
+
+        // Off: output == input exactly.
+        float buf[48], in[48];
+        float maxDiff = 0.f;
+        for (int block = 0; block < 100; block++) {
+            for (int i = 0; i < 48; i++) in[i] = buf[i] = 0.4f * std::sin(float(block * 48 + i) * 0.03f);
+            chain.Process(buf, 48);
+            for (int i = 0; i < 48; i++) maxDiff = std::fmax(maxDiff, std::fabs(buf[i] - in[i]));
+        }
+        CHECK(maxDiff < 1e-6f);
+
+        // Switch on: no sample-to-sample jump bigger than the signal's own slope allows.
+        chain.SetEnabled(0, true);
+        float prev = buf[47], maxStep = 0.f;
+        for (int block = 0; block < 20; block++) {
+            for (int i = 0; i < 48; i++) buf[i] = 0.4f * std::sin(float((100 + block) * 48 + i) * 0.03f);
+            chain.Process(buf, 48);
+            for (int i = 0; i < 48; i++) {
+                maxStep = std::fmax(maxStep, std::fabs(buf[i] - prev));
+                prev = buf[i];
+            }
+        }
+        CHECK(maxStep < 0.05f);
+        CHECK(chain.IsEnabled(0));
+    });
+
     Test("wav round-trips through 24-bit", [&] {
         wav::Audio a{44100.f, {0.f, 0.5f, -0.5f, 0.999f, -1.f}};
         const char* path = "build/roundtrip-test.wav";
@@ -175,7 +181,4 @@ int main() {
             CHECK(std::fabs(a.samples[i] - b.samples[i]) < 1e-6f);
         std::remove(path);
     });
-
-    std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
-    return failures;
 }

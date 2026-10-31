@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "Crossover.h"
+#include "Effect.h"
 #include "EnvelopeFollower.h"
 #include "Smoother.h"
 #include "Svf.h"
@@ -15,10 +16,10 @@ namespace bass {
  * The harder you pluck, the further a resonant filter sweeps. Optionally the
  * lows below a crossover stay dry so the low end never thins out.
  *
- * All knob values are 0..1 so the same struct can come from pots on the
- * pedal or command-line flags on the desktop.
+ * Usable two ways: directly via the Params struct (tests, bassfx), or via the
+ * generic Effect interface (pedal UI, OLED). Bypass lives in Chain.
  */
-class EnvelopeFilter {
+class EnvelopeFilter : public Effect {
 public:
     enum class Mode { LowPass, BandPass };
 
@@ -33,11 +34,14 @@ public:
         bool sweepDown = false;   // start high and close down instead of opening up
         bool cleanLows = true;    // keep everything below the crossover dry
         float crossoverHz = 150.f;
-        bool bypass = false;
     };
 
-    void Init(float sampleRate) {
-        sampleRate_ = sampleRate;
+    // Effect parameter indices: pots first, then toggles.
+    enum ParamIndex { kSens, kRange, kReso, kResp, kMix, kLevel, kMode, kSweep, kLows, kXover, kNumParams };
+
+    const char* Name() const override { return "Env Filter"; }
+
+    void Init(float sampleRate) override {
         filter_.Init(sampleRate);
         follower_.Init(sampleRate);
         crossover_.Init(sampleRate, params_.crossoverHz);
@@ -45,7 +49,6 @@ public:
         q_.Init(sampleRate, 0.03f);
         mix_.Init(sampleRate, 0.02f);
         gain_.Init(sampleRate, 0.02f);
-        wetAmount_.Init(sampleRate, 0.01f); // bypass crossfade, avoids clicks
         SetParams(params_, /*jump=*/true);
     }
 
@@ -62,13 +65,72 @@ public:
         Target(q_, 0.7f * std::pow(12.f / 0.7f, Clamp01(p.resonance)), jump);
         Target(mix_, Clamp01(p.mix), jump);
         Target(gain_, std::pow(10.f, (Clamp01(p.level) - 0.5f) * 36.f / 20.f), jump);
-        Target(wetAmount_, p.bypass ? 0.f : 1.f, jump);
     }
 
     const Params& GetParams() const { return params_; }
 
+    // --- Effect interface ---------------------------------------------------
+
+    int NumParams() const override { return kNumParams; }
+
+    ParamInfo Param(int i) const override {
+        static const ParamInfo info[kNumParams] = {
+            {"Sens", 0.5f},
+            {"Range", 0.3f},
+            {"Reso", 0.5f},
+            {"Resp", 0.4f},
+            {"Mix", 1.0f},
+            {"Level", 0.5f},
+            {"Mode", 0.f, true, "LP", "BP"},
+            {"Sweep", 0.f, true, "Up", "Down"},
+            {"Lows", 1.f, true, "Filt", "Clean"},
+            {"Xover", 0.f, true, "150", "250"},
+        };
+        return info[i];
+    }
+
+    void SetParam(int i, float v) override {
+        Params p = params_;
+        switch (i) {
+            case kSens: p.sensitivity = v; break;
+            case kRange: p.range = v; break;
+            case kReso: p.resonance = v; break;
+            case kResp: p.response = v; break;
+            case kMix: p.mix = v; break;
+            case kLevel: p.level = v; break;
+            case kMode: p.mode = v >= 0.5f ? Mode::BandPass : Mode::LowPass; break;
+            case kSweep: p.sweepDown = v >= 0.5f; break;
+            case kLows: p.cleanLows = v >= 0.5f; break;
+            case kXover: p.crossoverHz = v >= 0.5f ? 250.f : 150.f; break;
+            default: return;
+        }
+        SetParams(p);
+    }
+
+    float GetParam(int i) const override {
+        const Params& p = params_;
+        switch (i) {
+            case kSens: return p.sensitivity;
+            case kRange: return p.range;
+            case kReso: return p.resonance;
+            case kResp: return p.response;
+            case kMix: return p.mix;
+            case kLevel: return p.level;
+            case kMode: return p.mode == Mode::BandPass ? 1.f : 0.f;
+            case kSweep: return p.sweepDown ? 1.f : 0.f;
+            case kLows: return p.cleanLows ? 1.f : 0.f;
+            case kXover: return p.crossoverHz >= 200.f ? 1.f : 0.f;
+            default: return 0.f;
+        }
+    }
+
+    void Process(float* buffer, size_t size) override {
+        for (size_t i = 0; i < size; i++) buffer[i] = Process(buffer[i]);
+    }
+
+    // --- Per-sample processing ---------------------------------------------
+
     float Process(float in) {
-        const float bypassMix = wetAmount_.Process();
         const float base = baseHz_.Process();
         const float q = q_.Process();
         const float mix = mix_.Process();
@@ -91,8 +153,7 @@ public:
         const float filtered = params_.mode == Mode::LowPass ? f.low : f.band / q;
         const float wet = low + std::tanh(filtered); // tanh tames resonant peaks
 
-        const float effect = (in * (1.f - mix) + wet * mix) * gain;
-        return in + bypassMix * (effect - in);
+        return (in * (1.f - mix) + wet * mix) * gain;
     }
 
     /** Current envelope 0..1, e.g. to drive an LED's brightness. */
@@ -107,14 +168,13 @@ private:
         jump ? s.Jump(value) : s.SetTarget(value);
     }
 
-    float sampleRate_ = 48000.f;
     Params params_;
     float envGain_ = 1.f;
 
     Svf filter_;
     EnvelopeFollower follower_;
     Crossover crossover_;
-    Smoother baseHz_, q_, mix_, gain_, wetAmount_;
+    Smoother baseHz_, q_, mix_, gain_;
 };
 
 } // namespace bass
