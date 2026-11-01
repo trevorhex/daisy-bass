@@ -9,8 +9,6 @@ A multi-effect bass pedal built on an [Electro-Smith Daisy Seed](https://daisy.a
 
 **This build** uses the *screen panel*: a 0.96" OLED where SW 2, SW 3 and the LEDs normally go, keeping only SW 1 and SW 4. Build it with `make -C firmware SCREEN_PANEL=1`. The firmware still supports the stock Terrarium panel (4 toggles, 2 LEDs).
 
-Shopping list: [PARTS.md](PARTS.md).
-
 ## Layout
 
 ```
