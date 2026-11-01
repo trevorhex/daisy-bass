@@ -1,5 +1,7 @@
 #pragma once
 
+#include <initializer_list>
+
 #include "Svf.h"
 
 namespace bass {

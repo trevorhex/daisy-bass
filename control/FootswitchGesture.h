@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace bass {
 
 /**
@@ -10,14 +12,16 @@ namespace bass {
  *          player gets feedback without lifting their foot.
  *
  * Hardware-independent: feed it "is it pressed?" and a millisecond clock.
+ * Integer milliseconds, so it stays exact for days of uptime and survives
+ * the 32-bit counter wrapping (unsigned subtraction).
  */
 class FootswitchGesture {
 public:
     enum class Event { None, Tap, Hold };
 
-    static constexpr float kHoldMs = 500.f;
+    static constexpr uint32_t kHoldMs = 500;
 
-    Event Update(bool pressed, float nowMs) {
+    Event Update(bool pressed, uint32_t nowMs) {
         Event e = Event::None;
         if (pressed && !wasPressed_) {
             downAt_ = nowMs;
@@ -35,7 +39,7 @@ public:
 private:
     bool wasPressed_ = false;
     bool holdFired_ = false;
-    float downAt_ = 0.f;
+    uint32_t downAt_ = 0;
 };
 
 } // namespace bass

@@ -12,6 +12,10 @@
 // Free on the Terrarium: D11/D12 (I2C1 SCL/SDA), used here for the
 // optional OLED.
 //
+// SCREEN_PANEL build: the OLED sits where SW 2, SW 3 and both LEDs would
+// be, so only SW 1 (D10) and SW 4 (D7) are fitted and there are no LEDs.
+// Toggle index 0/1 is then SW 1/SW 4.
+//
 // We drive the Seed directly instead of reusing libDaisy's DaisyPetal class:
 // the Petal's knob numbering is not in pot order (its KNOB_2 is D19, i.e.
 // Terrarium Pot 4), and it also starts an encoder and an I2C LED driver
@@ -22,7 +26,13 @@
 class Terrarium {
 public:
     static constexpr int kNumPots = 6;
+#ifdef SCREEN_PANEL
+    static constexpr int kNumToggles = 2;
+    static constexpr int kNumLeds = 0;
+#else
     static constexpr int kNumToggles = 4;
+    static constexpr int kNumLeds = 2;
+#endif
     static constexpr int kNumFootswitches = 2;
     static constexpr size_t kBlockSize = 48; // 1 ms at 48 kHz
 
@@ -41,14 +51,18 @@ public:
         for (int i = 0; i < kNumPots; i++) pots_[i].Init(seed.adc.GetPtr(i), seed.AudioCallbackRate());
 
         // Lug 3 (clockwise end) goes to 3V3, so values rise clockwise.
+#ifdef SCREEN_PANEL
+        const Pin togglePins[kNumToggles] = {seed::D10, seed::D7};
+#else
         const Pin togglePins[kNumToggles] = {seed::D10, seed::D9, seed::D8, seed::D7};
+#endif
         for (int i = 0; i < kNumToggles; i++) toggles_[i].Init(togglePins[i]);
 
         footswitches_[0].Init(seed::D25);
         footswitches_[1].Init(seed::D26);
 
-        leds_[0].Init(seed::D22, GPIO::Mode::OUTPUT);
-        leds_[1].Init(seed::D23, GPIO::Mode::OUTPUT);
+        const Pin ledPins[2] = {seed::D22, seed::D23};
+        for (int i = 0; i < kNumLeds; i++) leds_[i].Init(ledPins[i], GPIO::Mode::OUTPUT);
     }
 
     void StartAdc() { seed.adc.Start(); }
@@ -63,14 +77,16 @@ public:
     /** Pot 1..6 as index 0..5, value 0..1. */
     float Pot(int i) const { return pots_[i].Value(); }
 
-    /** Toggle 1..4 as index 0..3. Which physical position reads "on" depends on how it's mounted. */
+    /** Toggle as index 0..kNumToggles-1. Which physical position reads "on" depends on how it's mounted. */
     bool Toggle(int i) const { return toggles_[i].Pressed(); }
 
     /** Footswitch 1..2 as index 0..1. */
     bool Footswitch(int i) const { return footswitches_[i].Pressed(); }
 
-    /** LED 1..2 as index 0..1. */
-    void SetLed(int i, bool on) { leds_[i].Write(on); }
+    /** LED 1..2 as index 0..1. Does nothing when the panel has no LEDs. */
+    void SetLed(int i, bool on) {
+        if (i < kNumLeds) leds_[i].Write(on);
+    }
 
 private:
     daisy::AnalogControl pots_[kNumPots];

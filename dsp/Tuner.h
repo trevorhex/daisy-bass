@@ -12,7 +12,7 @@ namespace bass {
  * Bass tuner using the YIN pitch detector (de Cheveigné & Kawahara, 2002).
  *
  * Split across two contexts:
- *   Push()    — audio callback. Low-passes, downsamples 48 kHz → 12 kHz,
+ *   Push()    — audio callback. Low-passes, downsamples to ~12 kHz,
  *               writes into a ring buffer. A few operations per sample.
  *   Analyze() — main loop, 10–20× per second. Runs YIN over the newest
  *               ~125 ms of audio. Never call this from the audio callback.
@@ -38,14 +38,17 @@ public:
         int Octave() const { return midiNote / 12 - 1; }
     };
 
-    static constexpr int kDecimation = 4;
+    static constexpr float kAnalysisRate = 12000.f; // decimate to about this
     static constexpr float kMinHz = 25.f;
     static constexpr float kMaxHz = 500.f;
     static constexpr float kThreshold = 0.15f; // YIN's dip threshold
     static constexpr float kGateRms = 0.004f;  // about -48 dBFS
 
     void Init(float sampleRate, float referenceA4 = 440.f) {
-        rate_ = sampleRate / kDecimation;
+        // 48 kHz → ÷4, 96 kHz → ÷8, ... so the lag range covers 25 Hz at any rate.
+        decimation_ = int(sampleRate / kAnalysisRate + 0.5f);
+        if (decimation_ < 1) decimation_ = 1;
+        rate_ = sampleRate / float(decimation_);
         reference_ = referenceA4;
         aa1_.Init(sampleRate);
         aa2_.Init(sampleRate);
@@ -65,7 +68,7 @@ public:
     /** Audio-callback side. Real-time safe. */
     void Push(float sample) {
         const float filtered = aa2_.Process(aa1_.Process(sample).low).low;
-        if (++phase_ < kDecimation) return;
+        if (++phase_ < decimation_) return;
         phase_ = 0;
         ring_[write_ & (kRingSize - 1)] = filtered;
         write_ = write_ + 1;
@@ -136,13 +139,14 @@ public:
 private:
     static constexpr int kRingSize = 2048; // power of two; 170 ms at 12 kHz
     static constexpr int kWindow = 1024;   // YIN integration window, 85 ms
-    static constexpr int kMaxLag = 480;    // 25 Hz at 12 kHz
+    static constexpr int kMaxLag = 500;    // 25 Hz at up to 12.5 kHz
 
     float rate_ = 12000.f;
     float reference_ = 440.f;
     int minLag_ = 24, maxLag_ = kMaxLag;
 
     Svf aa1_, aa2_;
+    int decimation_ = 4;
     int phase_ = 0;
     float ring_[kRingSize] = {};
     volatile uint32_t write_ = 0;

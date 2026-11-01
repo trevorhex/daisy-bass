@@ -50,6 +50,11 @@ public:
             Slot& s = slots_[i];
             // Fully off and settled: skip the effect entirely (saves CPU).
             if (!s.enabled && s.fade.Value() < 1e-4f) continue;
+            // Fully on and settled: no dry copy or crossfade needed.
+            if (s.enabled && s.fade.Value() > 1.f - 1e-4f) {
+                s.effect->Process(buffer, size);
+                continue;
+            }
 
             for (size_t n = 0; n < size; n++) dry_[n] = buffer[n];
             s.effect->Process(buffer, size);

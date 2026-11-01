@@ -41,11 +41,16 @@ inline Audio Read(const std::string& path) {
 
     for (size_t pos = 12; pos + 8 <= data.size();) {
         const uint8_t* chunk = data.data() + pos;
-        const uint32_t size = detail::U32(chunk + 4);
         const uint8_t* body = chunk + 8;
-        if (pos + 8 + size > data.size()) break;
+        const size_t available = data.size() - pos - 8;
+        size_t size = detail::U32(chunk + 4);
+        // Recorders that were stopped early (or stream to disk) can leave a
+        // data size that runs past the end of the file: use what's there.
+        const bool truncated = size > available;
+        if (truncated) size = available;
 
         if (!std::memcmp(chunk, "fmt ", 4)) {
+            if (size < 16) throw std::runtime_error(path + ": malformed fmt chunk");
             format = detail::U16(body);
             channels = detail::U16(body + 2);
             rate = detail::U32(body + 4);
@@ -55,6 +60,7 @@ inline Audio Read(const std::string& path) {
             pcm = body;
             pcmBytes = size;
         }
+        if (truncated) break;
         pos += 8 + size + (size & 1);
     }
 
@@ -79,8 +85,8 @@ inline Audio Read(const std::string& path) {
             } else if (bits == 16) {
                 v = int16_t(detail::U16(s)) / 32768.f;
             } else if (bits == 24) {
-                int32_t x = (s[0] << 8) | (s[1] << 16) | (int32_t(s[2]) << 24);
-                v = (x >> 8) / 8388608.f;
+                const uint32_t u = (uint32_t(s[0]) << 8) | (uint32_t(s[1]) << 16) | (uint32_t(s[2]) << 24);
+                v = float(int32_t(u) >> 8) / 8388608.f;
             } else {
                 v = int32_t(detail::U32(s)) / 2147483648.f;
             }
@@ -96,9 +102,10 @@ inline void Write(const std::string& path, const Audio& audio) {
     if (!f) throw std::runtime_error("can't write " + path);
 
     const uint32_t dataBytes = uint32_t(audio.samples.size() * 3);
+    const uint32_t pad = dataBytes & 1; // RIFF chunks are word-aligned
     const uint32_t rate = uint32_t(audio.sampleRate);
     f.write("RIFF", 4);
-    detail::Put(f, 36 + dataBytes, 4);
+    detail::Put(f, 36 + dataBytes + pad, 4);
     f.write("WAVEfmt ", 8);
     detail::Put(f, 16, 4);
     detail::Put(f, 1, 2);        // PCM
@@ -114,6 +121,7 @@ inline void Write(const std::string& path, const Audio& audio) {
         s = s > 1.f ? 1.f : (s < -1.f ? -1.f : s);
         detail::Put(f, uint32_t(int32_t(s * 8388607.f)), 3);
     }
+    if (pad) f.put(0);
 }
 
 } // namespace wav

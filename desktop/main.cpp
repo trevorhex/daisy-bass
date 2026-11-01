@@ -5,6 +5,8 @@
 //   afplay renders/wah.wav
 //   bassfx --tune renders/riff.wav                 # run the tuner over a file
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,7 +37,7 @@ void Usage() {
         "  --down         sweep down instead of up\n"
         "  --full-range   filter the lows too (no clean-low crossover)\n"
         "  --xover <hz>   crossover frequency (default 150)\n"
-        "  --block <n>    block size, like the pedal's audio callback (default 48)");
+        "  --block <n>    block size, like the pedal's audio callback (1..4096, default 48)");
 }
 
 /** Runs the tuner like the pedal does: push every block, analyze ~20×/second. */
@@ -113,7 +115,13 @@ int main(int argc, char** argv) {
         else if (a == "--down") p.sweepDown = true;
         else if (a == "--full-range") p.cleanLows = false;
         else if (a == "--xover") p.crossoverHz = Arg(i, argc, argv);
-        else if (a == "--block") block = int(Arg(i, argc, argv));
+        else if (a == "--block") {
+            block = int(Arg(i, argc, argv));
+            if (block < 1 || block > 4096) {
+                std::fprintf(stderr, "--block must be 1..4096\n");
+                return 2;
+            }
+        }
         else {
             std::fprintf(stderr, "unknown option %s\n\n", a.c_str());
             Usage();

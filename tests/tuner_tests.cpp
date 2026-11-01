@@ -19,12 +19,12 @@ float NoteHz(int midi, float cents = 0.f, float a4 = 440.f) {
  * `harmonics` gives each partial's amplitude, starting at the fundamental.
  */
 Tuner::Reading Listen(float freq, std::initializer_list<float> harmonics, float seconds = 0.4f,
-                      float amplitude = 0.3f, float a4 = 440.f) {
+                      float amplitude = 0.3f, float a4 = 440.f, float rate = kRate) {
     Tuner tuner;
-    tuner.Init(kRate, a4);
-    const size_t n = size_t(seconds * kRate);
+    tuner.Init(rate, a4);
+    const size_t n = size_t(seconds * rate);
     for (size_t i = 0; i < n; i++) {
-        const float t = float(i) / kRate;
+        const float t = float(i) / rate;
         float v = 0.f;
         int h = 1;
         for (float amp : harmonics) v += amp * std::sin(2.f * kPi * freq * float(h++) * t);
@@ -77,6 +77,15 @@ void RunTunerTests() {
         CHECK(r.valid);
         CHECK(r.midiNote == 33);
         CHECK_NEAR(r.cents, 0.f, 1.f);
+    });
+
+    Test("tuner reaches low B at 44.1 and 96 kHz too", [&] {
+        for (float rate : {44100.f, 96000.f}) {
+            const Tuner::Reading r = Listen(NoteHz(23, 6.f), {1.f, 0.5f, 0.33f}, 0.4f, 0.3f, 440.f, rate);
+            CHECK(r.valid);
+            CHECK(r.midiNote == 23);
+            CHECK_NEAR(r.cents, 6.f, 1.f);
+        }
     });
 
     Test("tuner stays quiet on silence and noise-floor hiss", [&] {

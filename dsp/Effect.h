@@ -22,6 +22,10 @@ struct ParamInfo {
  *
  * Real-time rules for implementations: SetParam() and Process() must not
  * allocate, lock, or block. SetParam() should only store targets.
+ *
+ * Param(), SetParam() and GetParam() must tolerate any index, including
+ * out-of-range ones (return a placeholder / do nothing / return 0): UI code
+ * is generic and a stale index must never read past a table.
  */
 class Effect {
 public:
@@ -37,6 +41,13 @@ public:
 
     /** Process a block in place. */
     virtual void Process(float* buffer, size_t size) = 0;
+
+    /**
+     * Something 0..1 worth showing on a meter or LED (an envelope, a
+     * compressor's gain reduction, ...), or < 0 when the effect has none.
+     * Called from the main loop, so it should just read a float.
+     */
+    virtual float Activity() const { return -1.f; }
 
     /** Restore every parameter to its default. */
     void ResetParams() {

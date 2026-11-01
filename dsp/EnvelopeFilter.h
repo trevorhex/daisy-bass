@@ -42,19 +42,26 @@ public:
     const char* Name() const override { return "Env Filter"; }
 
     void Init(float sampleRate) override {
-        filter_.Init(sampleRate);
+        cleanPath_.Init(sampleRate);
+        fullPath_.Init(sampleRate);
         follower_.Init(sampleRate);
         crossover_.Init(sampleRate, params_.crossoverHz);
         baseHz_.Init(sampleRate, 0.03f);
         q_.Init(sampleRate, 0.03f);
         mix_.Init(sampleRate, 0.02f);
         gain_.Init(sampleRate, 0.02f);
+        lows_.Init(sampleRate, 0.01f);
         SetParams(params_, /*jump=*/true);
     }
 
     /** Cheap: only stores targets. Safe to call once per audio block. */
     void SetParams(const Params& p, bool jump = false) {
         if (p.crossoverHz != params_.crossoverHz || jump) crossover_.SetFrequency(p.crossoverHz);
+        if (p.cleanLows != params_.cleanLows && !jump) {
+            // The path fading in has been idle; clear its stale state if it's silent.
+            const float weight = p.cleanLows ? lows_.Value() : 1.f - lows_.Value();
+            if (weight < kSilent) (p.cleanLows ? cleanPath_ : fullPath_).Reset();
+        }
         params_ = p;
 
         envGain_ = 0.5f * std::exp2(Clamp01(p.sensitivity) * 6.f); // 0.5x .. 32x
@@ -65,6 +72,7 @@ public:
         Target(q_, 0.7f * std::pow(12.f / 0.7f, Clamp01(p.resonance)), jump);
         Target(mix_, Clamp01(p.mix), jump);
         Target(gain_, std::pow(10.f, (Clamp01(p.level) - 0.5f) * 36.f / 20.f), jump);
+        Target(lows_, p.cleanLows ? 1.f : 0.f, jump);
     }
 
     const Params& GetParams() const { return params_; }
@@ -86,6 +94,7 @@ public:
             {"Lows", 1.f, true, "Filt", "Clean"},
             {"Xover", 0.f, true, "150", "250"},
         };
+        if (i < 0 || i >= kNumParams) return {"?", 0.f};
         return info[i];
     }
 
@@ -135,32 +144,46 @@ public:
         const float q = q_.Process();
         const float mix = mix_.Process();
         const float gain = gain_.Process();
+        const float lows = lows_.Process(); // 1 = clean lows, 0 = filtered; glides when switched
 
         // 0..1 "how hard am I playing", with a soft knee instead of a hard clamp.
         const float env = 1.f - std::exp(-follower_.Process(in) * envGain_);
         const float sweep = params_.sweepDown ? 1.f - env : env;
-        filter_.SetParams(base * std::exp2(kSweepOctaves * sweep), q);
+        const float cutoff = base * std::exp2(kSweepOctaves * sweep);
 
-        float low = 0.f, toFilter = in;
-        if (params_.cleanLows) {
-            const Crossover::Bands bands = crossover_.Process(in);
-            low = bands.low;
-            toFilter = bands.high;
+        // Always runs (it's cheap) so its state is ready when Lows is switched.
+        const Crossover::Bands bands = crossover_.Process(in);
+
+        // Both paths only run together during the short crossfade after Lows is switched.
+        float out = 0.f;
+        if (lows > kSilent) {
+            // Clean lows: Mix blends only the high band. The bands are phase-shifted
+            // against the full dry signal (180° at the crossover), so mixing them with
+            // it would cut a deep notch right at the crossover.
+            out += lows * (bands.low + Blend(cleanPath_, bands.high, cutoff, q, mix));
         }
+        if (lows < 1.f - kSilent) out += (1.f - lows) * Blend(fullPath_, in, cutoff, q, mix);
 
-        const Svf::Out f = filter_.Process(toFilter);
-        // Band output scaled by 1/Q so its peak sits at unity like the low-pass.
-        const float filtered = params_.mode == Mode::LowPass ? f.low : f.band / q;
-        const float wet = low + std::tanh(filtered); // tanh tames resonant peaks
-
-        return (in * (1.f - mix) + wet * mix) * gain;
+        return out * gain;
     }
 
     /** Current envelope 0..1, e.g. to drive an LED's brightness. */
     float Envelope() const { return 1.f - std::exp(-follower_.Value() * envGain_); }
 
+    float Activity() const override { return Envelope(); }
+
 private:
     static constexpr float kSweepOctaves = 4.f;
+    static constexpr float kSilent = 1e-4f;
+
+    /** dry → resonant filter → tanh, blended with dry by `mix`. */
+    float Blend(Svf& filter, float dry, float cutoff, float q, float mix) const {
+        filter.SetParams(cutoff, q);
+        const Svf::Out f = filter.Process(dry);
+        // Band output scaled by 1/Q so its peak sits at unity like the low-pass.
+        const float filtered = params_.mode == Mode::LowPass ? f.low : f.band / q;
+        return dry * (1.f - mix) + std::tanh(filtered) * mix; // tanh tames resonant peaks
+    }
 
     static float Clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
 
@@ -171,10 +194,10 @@ private:
     Params params_;
     float envGain_ = 1.f;
 
-    Svf filter_;
+    Svf cleanPath_, fullPath_; // the sweeping filter for Lows = Clean / Filtered
     EnvelopeFollower follower_;
     Crossover crossover_;
-    Smoother baseHz_, q_, mix_, gain_;
+    Smoother baseHz_, q_, mix_, gain_, lows_;
 };
 
 } // namespace bass

@@ -65,6 +65,7 @@ void RunDspTests() {
         EnvelopeFilter fx;
         EnvelopeFilter::Params p;
         p.mix = 0.f;
+        p.cleanLows = false; // with clean lows the crossover's (flat) phase shift remains
         fx.Init(kRate);
         fx.SetParams(p, true);
         float maxDiff = 0.f;
@@ -87,6 +88,52 @@ void RunDspTests() {
         fx.SetParams(p, true);
         const float lowRms = SineRms(41.2f, [&](float x) { return fx.Process(0.3f * x); }); // low E
         CHECK(std::fabs(Db(lowRms / (0.3f * sineRms))) < 1.5f);
+    });
+
+    Test("partial mix with clean lows has no notch at the crossover", [&] {
+        // Filter parked wide open so the response should be close to flat.
+        for (float xover : {150.f, 250.f}) {
+            for (float mix : {0.f, 0.25f, 0.5f, 0.75f}) {
+                for (float freq : {50.f, 100.f, xover, 1.5f * xover, 400.f}) {
+                    EnvelopeFilter::Params p;
+                    p.range = 1.f;
+                    p.sensitivity = 0.f;
+                    p.resonance = 0.f;
+                    p.mix = mix;
+                    p.crossoverHz = xover;
+                    EnvelopeFilter fx;
+                    fx.Init(kRate);
+                    fx.SetParams(p, true);
+                    const float rms = SineRms(freq, [&](float x) { return fx.Process(0.1f * x); });
+                    CHECK_NEAR(Db(rms / (0.1f * sineRms)), 0.f, 1.5f);
+                }
+            }
+        }
+    });
+
+    Test("switching Lows mid-note doesn't click", [&] {
+        for (bool startClean : {true, false}) {
+            EnvelopeFilter::Params p;
+            p.cleanLows = startClean;
+            p.resonance = 1.f;
+            EnvelopeFilter fx;
+            fx.Init(kRate);
+            fx.SetParams(p, true);
+            const float w = 2.f * kPi * 110.f / kRate;
+            float prev = 0.f, maxStep = 0.f, steadyStep = 0.f;
+            for (int i = 0; i < 24000; i++) {
+                if (i == 12000) {
+                    p.cleanLows = !startClean;
+                    fx.SetParams(p);
+                }
+                const float y = fx.Process(0.4f * std::sin(w * float(i)));
+                const float step = std::fabs(y - prev);
+                prev = y;
+                if (i > 6000 && i < 12000) steadyStep = std::fmax(steadyStep, step);
+                if (i >= 12000) maxStep = std::fmax(maxStep, step);
+            }
+            CHECK(maxStep < 1.5f * steadyStep + 0.005f);
+        }
     });
 
     Test("playing harder opens the filter (more highs)", [&] {
@@ -135,6 +182,12 @@ void RunDspTests() {
         }
         CHECK(fx.GetParams().mode == EnvelopeFilter::Mode::BandPass);
         CHECK(fx.GetParams().crossoverHz == 250.f);
+        // Out-of-range indices are harmless (UI code may hold a stale index).
+        for (int i : {-1, e.NumParams(), 999}) {
+            CHECK(e.Param(i).name != nullptr);
+            e.SetParam(i, 1.f);
+            CHECK(e.GetParam(i) == 0.f);
+        }
         e.ResetParams();
         for (int i = 0; i < e.NumParams(); i++) CHECK_NEAR(e.GetParam(i), e.Param(i).defaultValue, 1e-6f);
     });
@@ -179,6 +232,27 @@ void RunDspTests() {
         CHECK(b.samples.size() == a.samples.size());
         for (size_t i = 0; i < a.samples.size() && i < b.samples.size(); i++)
             CHECK(std::fabs(a.samples[i] - b.samples[i]) < 1e-6f);
+        std::remove(path);
+    });
+
+    Test("wav reader keeps the audio of a file cut off mid-recording", [&] {
+        wav::Audio a{48000.f, {0.1f, 0.2f, 0.3f, 0.4f, 0.5f}}; // odd sample count: writer pads
+        const char* path = "build/truncated-test.wav";
+        wav::Write(path, a);
+        // Chop the pad byte and the last sample off, as if the recorder had crashed.
+        std::FILE* f = std::fopen(path, "rb");
+        std::vector<char> bytes(4096);
+        bytes.resize(std::fread(bytes.data(), 1, bytes.size(), f));
+        std::fclose(f);
+        CHECK(bytes.size() == 44 + 15 + 1);
+        bytes.resize(bytes.size() - 4);
+        f = std::fopen(path, "wb");
+        std::fwrite(bytes.data(), 1, bytes.size(), f);
+        std::fclose(f);
+
+        const wav::Audio b = wav::Read(path);
+        CHECK(b.samples.size() == 4);
+        if (b.samples.size() == 4) CHECK_NEAR(b.samples[3], 0.4f, 1e-6f);
         std::remove(path);
     });
 }
