@@ -6,7 +6,7 @@ namespace bass {
 
 /** Describes one parameter so UIs (pots, toggles, OLED, CLI) can be generic. */
 struct ParamInfo {
-    const char* name;       // short, fits an OLED row: "Sens", "Reso"
+    const char* name;       // at most 6 characters (OLED row): "Sens", "Reso"
     float defaultValue;     // 0..1
     bool isSwitch = false;  // true: only 0 or 1 make sense (a toggle)
     const char* offLabel = nullptr; // for switches: label at 0 / 1, e.g. "LP" / "BP"

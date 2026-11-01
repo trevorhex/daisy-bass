@@ -1,10 +1,12 @@
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "../desktop/TestSignal.h"
 #include "../desktop/Wav.h"
 #include "../dsp/Chain.h"
+#include "../dsp/Compressor.h"
 #include "../dsp/Crossover.h"
 #include "../dsp/EnvelopeFilter.h"
 #include "../dsp/EnvelopeFollower.h"
@@ -169,6 +171,26 @@ void RunDspTests() {
         }
     });
 
+    Test("compressor params round-trip and names fit the screen", [&] {
+        Compressor c;
+        c.Init(kRate);
+        EnvelopeFilter f;
+        for (Effect* e : {static_cast<Effect*>(&c), static_cast<Effect*>(&f)}) {
+            for (int i = 0; i < e->NumParams(); i++) {
+                const ParamInfo info = e->Param(i);
+                CHECK(std::strlen(info.name) <= 6);
+                if (info.isSwitch) CHECK(info.offLabel && info.onLabel);
+                const float v = info.isSwitch ? 1.f : 0.37f;
+                e->SetParam(i, v);
+                CHECK_NEAR(e->GetParam(i), v, 1e-6f);
+            }
+            for (int i : {-1, e->NumParams()}) {
+                e->SetParam(i, 1.f);
+                CHECK(e->GetParam(i) == 0.f);
+            }
+        }
+    });
+
     Test("effect interface round-trips every parameter", [&] {
         EnvelopeFilter fx;
         fx.Init(kRate);
@@ -190,6 +212,95 @@ void RunDspTests() {
         }
         e.ResetParams();
         for (int i = 0; i < e.NumParams(); i++) CHECK_NEAR(e.GetParam(i), e.Param(i).defaultValue, 1e-6f);
+    });
+
+    // --- Compressor -----------------------------------------------------------
+    // Pot positions for exact settings (the param curves are exponential).
+    const float ratio4 = std::log(4.f / 1.5f) / std::log(20.f / 1.5f);     // 4:1
+    const float attack10ms = std::log(10.f / 0.3f) / std::log(50.f / 0.3f); // 10 ms
+    const float release100ms = std::log(2.5f) / std::log(25.f);             // 100 ms
+
+    auto makeComp = [&](bool opto, float attack, float release) {
+        Compressor c;
+        c.Init(kRate);
+        c.SetParam(Compressor::kThresh, 0.5f); // -20 dB
+        c.SetParam(Compressor::kRatio, ratio4);
+        c.SetParam(Compressor::kAttack, attack);
+        c.SetParam(Compressor::kRelease, release);
+        c.SetParam(Compressor::kMode, opto ? 1.f : 0.f);
+        return c;
+    };
+
+    Test("compressor leaves quiet signals alone", [&] {
+        Compressor c = makeComp(false, attack10ms, release100ms);
+        float maxDiff = 0.f;
+        for (int i = 0; i < 48000; i++) {
+            const float x = 0.01f * std::sin(float(i) * 0.03f); // -40 dBFS, threshold -20
+            maxDiff = std::fmax(maxDiff, std::fabs(c.Process(x) - x));
+        }
+        CHECK(maxDiff < 1e-6f);
+    });
+
+    Test("compressor holds the set ratio above threshold, in both modes", [&] {
+        // 0.5 peak = -6 dBFS: 14 dB over a -20 dB threshold at 4:1 → 10.5 dB down.
+        for (bool opto : {false, true}) {
+            Compressor c = makeComp(opto, attack10ms, 1.f);
+            const float rms = SineRms(200.f, [&](float x) { return c.Process(0.5f * x); }, 1.f);
+            CHECK_NEAR(Db(rms / (0.5f * sineRms)), -10.5f, 0.75f);
+        }
+    });
+
+    Test("compressor attack and release follow the knobs", [&] {
+        Compressor c = makeComp(false, attack10ms, release100ms);
+        for (int i = 0; i < int(0.002f * kRate); i++) c.Process(0.5f);
+        CHECK(c.GainReductionDb() < 0.3f * 10.5f); // 2 ms into a 10 ms attack: the pluck gets through
+        for (int i = 0; i < int(0.058f * kRate); i++) c.Process(0.5f);
+        CHECK(c.GainReductionDb() > 0.95f * 10.5f);
+        const float full = c.GainReductionDb();
+        for (int i = 0; i < int(0.05f * kRate); i++) c.Process(0.f);
+        CHECK(c.GainReductionDb() > 0.5f * full); // 50 ms into a 100 ms release
+        for (int i = 0; i < int(0.95f * kRate); i++) c.Process(0.f);
+        CHECK(c.GainReductionDb() < 0.01f * full);
+        CHECK(c.Activity() >= 0.f && c.Activity() <= 1.f);
+    });
+
+    Test("compressor HPF detect lets low notes through", [&] {
+        auto reduction = [&](float freq, bool hpf) {
+            Compressor c = makeComp(false, attack10ms, 1.f);
+            c.SetParam(Compressor::kDetect, hpf ? 1.f : 0.f);
+            SineRms(freq, [&](float x) { return c.Process(0.5f * x); }, 0.5f);
+            return c.GainReductionDb();
+        };
+        CHECK(reduction(41.2f, true) < reduction(400.f, true) - 5.f);
+        CHECK_NEAR(reduction(41.2f, false), reduction(400.f, false), 1.f); // full range: no difference
+    });
+
+    Test("compressor blend at zero is the dry signal; level is unity at noon", [&] {
+        Compressor c = makeComp(false, 0.f, 0.f);
+        c.SetParam(Compressor::kBlend, 0.f);
+        c.Init(kRate); // params kept; jump the blend smoother
+        float maxDiff = 0.f;
+        for (int i = 0; i < 4800; i++) {
+            const float x = 0.8f * std::sin(float(i) * 0.02f);
+            maxDiff = std::fmax(maxDiff, std::fabs(c.Process(x) - x));
+        }
+        CHECK(maxDiff < 1e-6f);
+    });
+
+    Test("compressor stays finite on the demo riff at extreme settings", [&] {
+        const auto riff = testsignal::BassRiff(kRate, 1);
+        for (bool opto : {false, true}) {
+            for (float v : {0.f, 1.f}) {
+                Compressor c;
+                c.Init(kRate);
+                for (int i = 0; i < Compressor::kNumParams; i++) c.SetParam(i, v);
+                c.SetParam(Compressor::kMode, opto ? 1.f : 0.f);
+                float peak = 0.f;
+                for (float s : riff) peak = std::fmax(peak, std::fabs(c.Process(s)));
+                CHECK(std::isfinite(peak));
+                CHECK(peak < 9.f); // +18 dB level on a hot riff, but nothing runaway
+            }
+        }
     });
 
     Test("chain bypass is transparent and switches without clicks", [&] {

@@ -4,7 +4,10 @@ A multi-effect bass pedal built on an [Electro-Smith Daisy Seed](https://daisy.a
 
 **So far:**
 - An **envelope filter** voiced for bass. It's a resonant filter that opens as you dig in, with an optional crossover that keeps everything below 150/250 Hz dry so the low end never thins out.
+- A **compressor** with Fast (peak) and Opto (smooth, two-stage release) modes, a Blend knob for parallel compression, and a detector high-pass so low notes don't pump.
 - A **tuner** that mutes the output while you tune. It works down to a 5-string's low B.
+- **8 presets**, saved only when you choose to.
+- A **desktop simulator** (`pedalsim`) that runs the real pedal code with live audio.
 - Groundwork for more effects: a common effect interface, a click-free effect chain, effect pages with knob pickup, and an OLED display.
 
 **This build** uses the *screen panel*: a 0.96" OLED where SW 2, SW 3 and the LEDs normally go, keeping only SW 1 and SW 4. Build it with `make -C firmware SCREEN_PANEL=1`. The firmware still supports the stock Terrarium panel (4 toggles, 2 LEDs).
@@ -15,24 +18,46 @@ A multi-effect bass pedal built on an [Electro-Smith Daisy Seed](https://daisy.a
 dsp/        Sound. Pure C++, no hardware dependencies, shared by desktop and pedal
   Effect.h            interface every effect implements (indexed 0..1 params)
   Chain.h             runs effects in series, click-free on/off per effect
+  Compressor.h        the compressor
   EnvelopeFilter.h    the envelope filter
   Tuner.h             YIN pitch detector (25–500 Hz, ±1 cent)
   Svf.h, Crossover.h, EnvelopeFollower.h, Smoother.h   building blocks
-control/    UI logic, also hardware-independent and tested
-  KnobPickup.h        pots don't jump when switching effect pages
-  PotSwitch.h         a pot standing in for a toggle (flips at the midpoint)
-  PageLayout.h        spreads an effect's params over pages of pots + toggles
-  FootswitchGesture.h tap vs hold
+control/    The pedal minus hardware: shared by the firmware and the simulator, tested
+  Pedal.h             effects in chain order, tuner, output mute; the audio callback's body
+  PedalUi.h           what every footswitch, pot and toggle does (preset/edit modes, pages, saving)
+  Presets.h           the preset bank: plain data, written to flash or a file as-is
+  PageView.h          snapshot of the current state that the screen/LEDs draw from
+  KnobPickup.h, PotSwitch.h, PageLayout.h, FootswitchGesture.h, FootswitchPair.h
+ui/         Screens.h: every OLED screen + the stock panel's LEDs, drawn on any canvas
+            Framebuffer.h: an in-memory OLED for the simulator and tests
+sim/        pedalsim: the pedal on your Mac (SDL2 + Dear ImGui, fetched by CMake)
 desktop/    bassfx: run the DSP on WAV files on your Mac
-tests/      tests across DSP, tuner and controls (plain C++, no framework)
-firmware/   Daisy/Terrarium glue: controls, audio callback, LEDs, OLED
-  PageView.h          snapshot of the current page that the main loop draws from
+tests/      tests across DSP, tuner, controls, presets and screens (plain C++, no framework)
+firmware/   Daisy/Terrarium glue: reads controls, runs Pedal, draws the OLED, saves presets to flash
 lib/        libDaisy + DaisySP (git submodules)
 ```
 
-The rule: **anything that touches sound lives in `dsp/` and is tested on the desktop.** The firmware only reads controls and moves numbers around.
+The rule: **anything that touches sound lives in `dsp/`, anything about how the controls behave lives in `control/`, and both are tested on the desktop.** The firmware and the simulator only move numbers between hardware (real or drawn) and `bass::Pedal`, so the simulator behaves exactly like the pedal.
 
-**Adding an effect:** implement `bass::Effect` in `dsp/` (continuous params first, then switches; see `EnvelopeFilter.h`), add tests, then in `firmware/main.cpp` declare a static instance and `chain.Add()` it. Pages, knob pickup, toggles, the OLED and the activity LED all work from the `Effect` interface. Override `Activity()` if the effect has something worth metering. Param lookups must tolerate out-of-range indices (see `Effect.h`).
+**Adding an effect:** implement `bass::Effect` in `dsp/` (continuous params first, then switches; names of up to 6 characters so they fit the screen; see `EnvelopeFilter.h`), add tests, then add it to `control/Pedal.h` (a member, plus `chain.Add()` in chain order) and optionally a factory preset. Pages, presets, knob pickup, toggles, the screen and the activity meter all work from the `Effect` interface. Override `Activity()` if the effect has something worth metering. Param lookups must tolerate out-of-range indices (see `Effect.h`).
+
+## Simulator
+
+```bash
+cmake -S . -B build && cmake --build build   # first time also downloads SDL2 + Dear ImGui (~1 min)
+./build/pedalsim
+```
+
+The pedal is drawn as it will be built (screen panel). Everything on it runs the real pedal code; the screen uses the pedal's own fonts, pixel for pixel.
+
+- **Pots:** drag up/down or scroll. Hold Shift for fine moves.
+- **Toggles:** click (up = on).
+- **Footswitches:** hold the mouse button on them, or use **Z** (FS 1) and **X** (FS 2). Use the keys to press both at once.
+- **Side panel:** the screen at 3×, what the footswitches do right now, what every control edits (orange = a pot waiting to pick up), the audio source and levels, and presets.
+- **Audio sources:** the demo riff, any WAV file (drag it onto the window), or **live input** from your audio interface. Use headphones. The first time, macOS asks to let your terminal use the microphone.
+- **Presets** are saved in `~/.daisy-bass-presets.bin`, the same format the pedal stores in flash. "Reset presets to factory" in the side panel starts over.
+
+To build only the tests and `bassfx` (no download): `cmake -S . -B build -DBASS_SIM=OFF`.
 
 ## Desktop workflow
 
@@ -50,12 +75,39 @@ Better still, record a dry DI track of your own bass (any WAV: 16/24/32-bit or f
 
 ## Pedal controls
 
+The pedal has two modes. It powers up in **Preset mode** on the last preset you saved.
+
+| | **Preset mode** | **Edit mode** |
+|---|---|---|
+| **FS 1 tap** | Previous preset | Current effect on/off (click-free) |
+| **FS 2 tap** | Next preset | Next page |
+| **FS 1 hold** (½ s) | Go to Edit mode | Back to Preset mode |
+| **FS 2 hold** (½ s) | Tuner (output muted) | Tuner (output muted) |
+| **Both held** (1 s) | Save to the current preset | Save to the current preset |
+| **Pots / toggles** | Edit the current page; the page pops up on the screen for 2 s | Edit the current page |
+
+- **Saving:** nothing is saved until you hold both footswitches. A `*` (and "edited") shows unsaved changes. Changing preset or powering off brings back the saved version.
+- **Tuner:** any tap leaves it.
+- **Taps:** a tap registers when you lift your foot, because a press might still turn into a hold.
+- **Loading a preset** puts the pots on the first page of the first effect that's on in it.
+- **Factory presets:** P1 compressor, P2 envelope filter, P3 both, P4 smooth opto squeeze, P5 compressed quack (band-pass), P6 sweep down, P7–P8 clean.
+- **Chain order:** compressor → envelope filter. In Edit mode FS 2 steps through every page of every effect: Compressor (1 page), then Env Filter (2 pages on the screen panel).
+- **Screen divider:** fills with your playing (the effect's activity, e.g. the Env Filter's envelope).
+
+**Compressor** (one page on either panel)
+
 | Control | Function |
 |---|---|
-| **FS 1 tap** | Current effect on/off. A click-free crossfade. Shown as an inverted **ON** on the screen (LED 1 on the stock panel). Also exits the tuner |
-| **FS 2 hold** (½ s) | Tuner on/off. The output is muted while tuning |
-| **FS 2 tap** | Next page. Also exits the tuner |
-| Screen divider | Fills with your playing: the current effect's activity, e.g. the Env Filter's envelope (LED 2 on the stock panel) |
+| Pot 1 | Thresh: −40 to 0 dB |
+| Pot 2 | Ratio: 1.5:1 to 20:1 |
+| Pot 3 | Atk (attack): 0.3–50 ms. Slower lets the pluck through before it clamps down |
+| Pot 4 | Rel (release): 40 ms – 1 s |
+| Pot 5 | Blend: dry to compressed. Below full, the dry attack stays on top (parallel compression) |
+| Pot 6 | Level: −18 to +18 dB, noon is unity |
+| SW 1 | Mode: Fast (peak detector, grabs every pluck) / Opto (smooth, quick-then-slow release) |
+| SW 4 | Detect: Full / HPF (the detector ignores lows below ~100 Hz, so open low strings don't pump) |
+
+The screen's divider shows gain reduction (full width = 20 dB).
 
 **Env Filter, screen panel (this build)**
 
@@ -74,16 +126,12 @@ Lows and Crossover are set-and-forget, so they live on page 2 (tap FS 2). They f
 
 **Env Filter, stock panel:** one page. Pots as page 1 above; SW 1 LP/BP, SW 2 sweep up/down, SW 3 lows filtered/clean, SW 4 crossover 150/250 Hz.
 
-**Tuner (stock panel, LEDs only)**
-- LED 1 blinks: you're **flat**.
-- LED 2 blinks: you're **sharp**.
-- Faster blinking means further off.
-- **Both solid:** in tune (±3 cents).
-- **Slow heartbeat:** no note detected.
+**Stock panel LEDs (no screen)**
+- Preset mode: LED 1 blinks the preset number after a change, then stays lit. LED 2 shows activity.
+- Edit mode: LED 1 = current effect on, LED 2 = its activity.
+- Tuner: LED 1 blinks when you're **flat**, LED 2 when you're **sharp**, faster when further off. **Both solid** = in tune (±3 cents). **Slow heartbeat** = no note.
 
-The LEDs can't show the note name. The OLED shows the note, a needle and the cents.
-
-**Pages:** each effect gets as many pages as it needs; FS 2 steps through all of them. The pots edit the current page. After switching pages, a pot does nothing until you turn it past the effect's stored value ("pickup"), so the sound never jumps. On the OLED, the bar shows the stored value and a tick shows where the pot actually is: turn the tick to the end of the bar. Toggles only act when flipped.
+**Pages:** each effect gets as many pages as it needs; in Edit mode FS 2 steps through all of them. The pots edit the current page. After switching pages, a pot does nothing until you turn it past the effect's stored value ("pickup"), so the sound never jumps. On the OLED, the bar shows the stored value and a tick shows where the pot actually is: turn the tick to the end of the bar. Toggles only act when flipped.
 
 ## Firmware setup (one time)
 
@@ -120,7 +168,9 @@ Build flags:
 | `KNOB_CHECK=1` | Control diagnostic: prints every pot/switch over USB serial instead of processing audio |
 | `BOOT_SRAM=1` | Runs via Electro-Smith's bootloader, allowing programs of about 480 KB |
 
-**Memory budget:** the stock build uses 117 KB of the Seed's 128 KB internal flash (89%), so the next effect will need the bootloader anyway. With the bootloader the screen build uses 137 KB of about 480 KB.
+**Memory budget:** the stock build uses 111 KB of the Seed's 128 KB internal flash (87%), so the next effect will probably need the bootloader. With the bootloader the screen build uses 137 KB of about 480 KB.
+
+**Presets on the pedal** live in the last 64 KB of the Seed's 8 MB QSPI flash (offset `0x7F0000`), clear of the bootloader's program area. First boot writes the factory presets there.
 
 **First flash:** run the control check and confirm every pot and switch:
 

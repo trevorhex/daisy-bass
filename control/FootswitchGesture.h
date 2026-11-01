@@ -36,6 +36,9 @@ public:
         return e;
     }
 
+    /** Forget the current press: no tap or hold until the switch is pressed again. */
+    void Suppress() { holdFired_ = true; }
+
 private:
     bool wasPressed_ = false;
     bool holdFired_ = false;

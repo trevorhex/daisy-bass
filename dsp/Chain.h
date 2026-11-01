@@ -33,9 +33,11 @@ public:
     Effect* At(int slot) const { return slots_[slot].effect; }
 
     bool IsEnabled(int slot) const { return slots_[slot].enabled; }
-    void SetEnabled(int slot, bool on) {
+    /** `immediate` skips the crossfade (e.g. loading a preset at power-up). */
+    void SetEnabled(int slot, bool on, bool immediate = false) {
         slots_[slot].enabled = on;
-        slots_[slot].fade.SetTarget(on ? 1.f : 0.f);
+        if (immediate) slots_[slot].fade.Jump(on ? 1.f : 0.f);
+        else slots_[slot].fade.SetTarget(on ? 1.f : 0.f);
     }
     void Toggle(int slot) { SetEnabled(slot, !slots_[slot].enabled); }
 
