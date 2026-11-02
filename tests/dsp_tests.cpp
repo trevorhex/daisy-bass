@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <vector>
 
 #include "../desktop/TestSignal.h"
@@ -8,6 +9,7 @@
 #include "../dsp/Chain.h"
 #include "../dsp/Compressor.h"
 #include "../dsp/Crossover.h"
+#include "../dsp/Drive.h"
 #include "../dsp/EnvelopeFilter.h"
 #include "../dsp/EnvelopeFollower.h"
 #include "../dsp/Svf.h"
@@ -171,11 +173,13 @@ void RunDspTests() {
         }
     });
 
-    Test("compressor params round-trip and names fit the screen", [&] {
+    Test("effect params round-trip and names fit the screen", [&] {
         Compressor c;
         c.Init(kRate);
         EnvelopeFilter f;
-        for (Effect* e : {static_cast<Effect*>(&c), static_cast<Effect*>(&f)}) {
+        Drive d;
+        d.Init(kRate);
+        for (Effect* e : {static_cast<Effect*>(&c), static_cast<Effect*>(&f), static_cast<Effect*>(&d)}) {
             for (int i = 0; i < e->NumParams(); i++) {
                 const ParamInfo info = e->Param(i);
                 CHECK(std::strlen(info.name) <= 6);
@@ -299,6 +303,120 @@ void RunDspTests() {
                 for (float s : riff) peak = std::fmax(peak, std::fabs(c.Process(s)));
                 CHECK(std::isfinite(peak));
                 CHECK(peak < 9.f); // +18 dB level on a hot riff, but nothing runaway
+            }
+        }
+    });
+
+    // --- Drive ----------------------------------------------------------------
+
+    // Level of a sine's fundamental and of everything else (harmonics), over
+    // whole periods after a settling second.
+    struct Spectrum { float fundamental, rest; };
+    auto measure = [&](float freq, float amplitude, const std::function<float(float)>& process) {
+        const float w = 2.f * kPi * freq / kRate;
+        const int settle = int(kRate), periods = int(freq), n = int(float(periods) * kRate / freq);
+        for (int i = 0; i < settle; i++) process(amplitude * std::sin(w * float(i)));
+        double re = 0, im = 0, total = 0;
+        for (int i = 0; i < n; i++) {
+            const float y = process(amplitude * std::sin(w * float(settle + i)));
+            re += double(y) * std::cos(double(w) * (settle + i));
+            im += double(y) * std::sin(double(w) * (settle + i));
+            total += double(y) * double(y);
+        }
+        const double fundRms = std::sqrt(2.0 * (re * re + im * im)) / double(n);
+        const double totalRms = std::sqrt(total / double(n));
+        return Spectrum{float(fundRms), float(std::sqrt(std::fmax(0.0, totalRms * totalRms - fundRms * fundRms)))};
+    };
+    auto makeDrive = [&](float drive, bool cleanLows, bool fuzz = false) {
+        Drive d;
+        d.Init(kRate);
+        d.SetParam(Drive::kDrive, drive);
+        d.SetParam(Drive::kLows, cleanLows ? 1.f : 0.f);
+        d.SetParam(Drive::kChar, fuzz ? 1.f : 0.f);
+        d.Init(kRate); // jump the smoothers to the settings
+        return d;
+    };
+
+    Test("drive at minimum is nearly clean and near unity", [&] {
+        Drive d = makeDrive(0.f, false);
+        const Spectrum s = measure(220.f, 0.1f, [&](float x) { return d.Process(x); });
+        CHECK_NEAR(Db(s.fundamental / (0.1f * sineRms)), 0.f, 1.5f);
+        CHECK(s.rest < 0.05f * s.fundamental);
+    });
+
+    Test("more drive adds harmonics without getting much louder", [&] {
+        for (bool fuzz : {false, true}) {
+            float lastRatio = 0.f;
+            for (float drive : {0.2f, 0.6f, 1.f}) {
+                Drive d = makeDrive(drive, false, fuzz);
+                const Spectrum s = measure(110.f, 0.3f, [&](float x) { return d.Process(x); });
+                const float ratio = s.rest / s.fundamental;
+                CHECK(ratio > lastRatio);
+                lastRatio = ratio;
+                const float rms = std::sqrt(s.fundamental * s.fundamental + s.rest * s.rest);
+                CHECK_NEAR(Db(rms / (0.3f * sineRms)), 0.f, 4.f);
+            }
+            CHECK(lastRatio > 0.3f); // fully driven is properly dirty
+        }
+    });
+
+    Test("drive with clean lows leaves the low E undistorted", [&] {
+        float ratio[2];
+        for (bool clean : {false, true}) {
+            Drive d = makeDrive(1.f, clean);
+            const Spectrum s = measure(41.2f, 0.3f, [&](float x) { return d.Process(x); });
+            ratio[clean] = s.rest / s.fundamental;
+            // The high band's sliver of the note is driven up too, so a bit louder.
+            if (clean) CHECK_NEAR(Db(s.fundamental / (0.3f * sineRms)), 0.f, 2.5f);
+        }
+        CHECK(ratio[0] > 0.3f);
+        CHECK(ratio[1] < 0.05f);
+    });
+
+    Test("drive blend at zero is the dry signal (no notch with clean lows)", [&] {
+        for (bool clean : {false, true}) {
+            for (float freq : {60.f, 141.f, 300.f, 2000.f}) {
+                Drive d = makeDrive(1.f, clean);
+                d.SetParam(Drive::kBlend, 0.f);
+                d.Init(kRate);
+                const float rms = SineRms(freq, [&](float x) { return d.Process(0.3f * x); });
+                CHECK_NEAR(Db(rms / (0.3f * sineRms)), 0.f, 0.3f);
+            }
+        }
+    });
+
+    Test("switching drive Lows or Char mid-note doesn't click", [&] {
+        // The sound changes (a fuzz has steeper edges), so the transition is
+        // compared with the steady state on both sides of it.
+        for (int param : {int(Drive::kLows), int(Drive::kChar)}) {
+            for (bool start : {false, true}) {
+                Drive d = makeDrive(0.3f, start, start);
+                const float w = 2.f * kPi * 110.f / kRate;
+                float prev = 0.f, switchStep = 0.f, steadyStep = 0.f;
+                for (int i = 0; i < 36000; i++) {
+                    if (i == 12000) d.SetParam(param, start ? 0.f : 1.f);
+                    const float y = d.Process(0.3f * std::sin(w * float(i)));
+                    const float step = std::fabs(y - prev);
+                    prev = y;
+                    if ((i > 6000 && i < 12000) || i > 30000) steadyStep = std::fmax(steadyStep, step);
+                    if (i >= 12000 && i < 14400) switchStep = std::fmax(switchStep, step);
+                }
+                CHECK(switchStep < 1.2f * steadyStep + 0.005f);
+            }
+        }
+    });
+
+    Test("drive stays finite on the demo riff at extreme settings", [&] {
+        const auto riff = testsignal::BassRiff(kRate, 1);
+        for (float v : {0.f, 1.f}) {
+            for (float sw : {0.f, 1.f}) {
+                Drive d;
+                d.Init(kRate);
+                for (int i = 0; i < Drive::kNumParams; i++) d.SetParam(i, d.Param(i).isSwitch ? sw : v);
+                float peak = 0.f;
+                for (float s : riff) peak = std::fmax(peak, std::fabs(d.Process(s)));
+                CHECK(std::isfinite(peak));
+                CHECK(peak < 20.f); // +12 dB Mid and +18 dB Level on a hot riff, but nothing runaway
             }
         }
     });

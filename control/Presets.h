@@ -22,8 +22,11 @@ inline uint32_t EffectId(const Effect& fx) {
  */
 struct PresetBank {
     static constexpr uint32_t kMagic = 0x42415353; // "BASS"
-    static constexpr uint32_t kVersion = 1;
-    static constexpr int kNumPresets = 8;
+    static constexpr uint32_t kVersion = 2;
+    static constexpr int kNumPresets = 16;
+    // Version 1 had 8 presets and was otherwise identical, so a version 1
+    // bank is the start of a version 2 one (see UpgradeBank).
+    static constexpr int kV1NumPresets = 8;
     static constexpr int kMaxEffects = Chain::kMaxEffects;
     static constexpr int kMaxParams = 16;
 
@@ -47,6 +50,9 @@ struct PresetBank {
     PresetBank() { std::memset(this, 0, sizeof *this); }
 
     bool Valid() const { return magic == kMagic && version == kVersion && current < uint32_t(kNumPresets); }
+
+    /** A version 1 bank: readable by UpgradeBank(). */
+    bool IsV1() const { return magic == kMagic && version == 1 && current < uint32_t(kV1NumPresets); }
 
     bool operator==(const PresetBank& o) const { return std::memcmp(this, &o, sizeof *this) == 0; }
     bool operator!=(const PresetBank& o) const { return !(*this == o); }
@@ -101,6 +107,19 @@ inline PresetBank MakeEmptyBank(const Chain& chain) {
     bank.version = PresetBank::kVersion;
     for (auto& p : bank.presets) CapturePreset(chain, p);
     return bank;
+}
+
+/**
+ * Bring an older bank up to date: its presets keep their slots and the new
+ * slots get the chain as it is now (normally: defaults, all off), like
+ * MakeEmptyBank(). Returns false if `old` isn't a bank it understands.
+ */
+inline bool UpgradeBank(const PresetBank& old, const Chain& chain, PresetBank& out) {
+    if (!old.IsV1()) return false;
+    out = MakeEmptyBank(chain);
+    out.current = old.current;
+    for (int i = 0; i < PresetBank::kV1NumPresets; i++) out.presets[i] = old.presets[i];
+    return true;
 }
 
 } // namespace bass

@@ -5,6 +5,7 @@
 
 #include "../dsp/Chain.h"
 #include "../dsp/Compressor.h"
+#include "../dsp/Drive.h"
 #include "../dsp/EnvelopeFilter.h"
 #include "../dsp/Smoother.h"
 #include "../dsp/Tuner.h"
@@ -26,10 +27,12 @@ class Pedal {
 public:
     static constexpr size_t kBlockSize = 48; // 1 ms at 48 kHz: one control update per block
 
-    // Chain order: compressor first (it evens out what the filter's envelope reacts to).
+    // Chain order: compressor first (it evens out what the drive and the filter's
+    // envelope react to), then drive, then the envelope filter.
     Compressor compressor;
+    Drive drive;
     EnvelopeFilter envFilter;
-    enum Slot { kCompSlot, kEnvSlot };
+    enum Slot { kCompSlot, kDriveSlot, kEnvSlot };
 
     Chain chain;
     Tuner tuner;
@@ -42,11 +45,14 @@ public:
     void Init(float sampleRate, int numPots, int numToggles, const PresetBank* saved,
               const PedalUi::Inputs& inputs, uint32_t nowMs) {
         chain.Add(&compressor, false); // kCompSlot
+        chain.Add(&drive, false);      // kDriveSlot
         chain.Add(&envFilter, false);  // kEnvSlot
         chain.Init(sampleRate);
         tuner.Init(sampleRate);
         outputGain_.Init(sampleRate, 0.01f, 1.f);
-        const PresetBank bank = (saved && saved->Valid()) ? *saved : FactoryBank();
+        PresetBank bank;
+        if (saved && saved->Valid()) bank = *saved;
+        else if (!saved || !UpgradeBank(*saved, chain, bank)) bank = FactoryBank();
         ui.Init(&chain, numPots, numToggles, bank, inputs, nowMs);
     }
 
@@ -60,7 +66,7 @@ public:
             }
         };
         start();
-        PresetBank bank = MakeEmptyBank(chain); // P7, P8: clean (all off)
+        PresetBank bank = MakeEmptyBank(chain); // P9..P16: empty (all off)
 
         start(); // P1: compressor, defaults (Fast)
         chain.SetEnabled(kCompSlot, true, true);
@@ -98,6 +104,26 @@ public:
         envFilter.SetParam(EnvelopeFilter::kReso, 0.6f);
         chain.SetEnabled(kEnvSlot, true, true);
         CapturePreset(chain, bank.presets[5]);
+
+        start(); // P7: compressed grit, clean lows (the classic bass drive)
+        drive.SetParam(Drive::kDrive, 0.55f);
+        drive.SetParam(Drive::kMid, 0.6f);
+        drive.SetParam(Drive::kBlend, 0.8f);
+        drive.SetParam(Drive::kLevel, 0.58f); // +3 dB: matches the dry level
+        chain.SetEnabled(kCompSlot, true, true);
+        chain.SetEnabled(kDriveSlot, true, true);
+        CapturePreset(chain, bank.presets[6]);
+
+        start(); // P8: fuzz into the envelope filter (synthy)
+        drive.SetParam(Drive::kChar, 1.f);
+        drive.SetParam(Drive::kDrive, 0.6f);
+        drive.SetParam(Drive::kTone, 0.75f);
+        envFilter.SetParam(EnvelopeFilter::kReso, 0.7f);
+        envFilter.SetParam(EnvelopeFilter::kSens, 0.4f);
+        envFilter.SetParam(EnvelopeFilter::kLevel, 0.4f); // -3.6 dB: matches the dry level
+        chain.SetEnabled(kDriveSlot, true, true);
+        chain.SetEnabled(kEnvSlot, true, true);
+        CapturePreset(chain, bank.presets[7]);
 
         start();
         return bank;

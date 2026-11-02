@@ -163,7 +163,9 @@ bool LoadPresets(bass::PresetBank& bank) {
     std::ifstream f(PresetPath(), std::ios::binary);
     if (!f) return false;
     f.read(reinterpret_cast<char*>(&bank), sizeof bank);
-    return f.gcount() == std::streamsize(sizeof bank) && bank.Valid();
+    if (f.gcount() == std::streamsize(sizeof bank) && bank.Valid()) return true;
+    // An older, shorter bank: the pedal upgrades it (its presets keep their slots).
+    return bank.IsV1();
 }
 
 void SavePresets(const bass::PresetBank& bank) {
@@ -540,7 +542,7 @@ int main(int, char**) {
         ImGui::TextWrapped("%s", presetStatus.c_str());
         if (ImGui::Button("Reset presets to factory...")) ImGui::OpenPopup("reset");
         if (ImGui::BeginPopupModal("reset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("Replace all 8 presets with the factory presets?");
+            ImGui::Text("Replace all %d presets with the factory presets?", bass::PresetBank::kNumPresets);
             if (ImGui::Button("Replace")) {
                 bass::PresetBank bank;
                 {

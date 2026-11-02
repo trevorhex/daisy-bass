@@ -1,4 +1,5 @@
 #include <cstring>
+#include <string>
 
 #include "../control/FootswitchPair.h"
 #include "../control/Pedal.h"
@@ -69,6 +70,7 @@ struct Rig {
     float Comp(int param) const { return pedal.compressor.GetParam(param); }
     bool CompOn() const { return pedal.chain.IsEnabled(Pedal::kCompSlot); }
     bool EnvOn() const { return pedal.chain.IsEnabled(Pedal::kEnvSlot); }
+    bool DriveOn() const { return pedal.chain.IsEnabled(Pedal::kDriveSlot); }
 };
 
 int LitPixels(const ui::Framebuffer& fb, int x0, int y0, int x1, int y1) {
@@ -164,6 +166,32 @@ void RunPedalTests() {
         CHECK(again.CompOn() && again.EnvOn()); // factory P3: both
     });
 
+    Test("a saved 8-preset bank is upgraded, keeping its presets", [&] {
+        Rig fresh;
+        PresetBank old = fresh.pedal.ui.Bank();
+        old.version = 1;
+        old.current = 5;
+        old.presets[5].fx[Pedal::kCompSlot].values[Compressor::kThresh] = 0.9f;
+        // Past the old bank's end: whatever the flash held (erased flash reads 0xFF).
+        std::memset(&old.presets[PresetBank::kV1NumPresets], 0xFF,
+                    sizeof(PresetBank::Preset) * (PresetBank::kNumPresets - PresetBank::kV1NumPresets));
+        Rig r(&old);
+        CHECK(r.pedal.ui.Bank().Valid());
+        CHECK(r.pedal.ui.Preset() == 5);
+        CHECK_NEAR(r.Comp(Compressor::kThresh), 0.9f, 1e-6f);
+        for (int i = PresetBank::kV1NumPresets; i < PresetBank::kNumPresets; i++) {
+            const PresetBank::Preset& p = r.pedal.ui.Bank().presets[i];
+            CHECK(p.numEffects == uint32_t(r.pedal.chain.Size()));
+            for (uint32_t e = 0; e < p.numEffects; e++) CHECK(p.fx[e].enabled == 0);
+        }
+
+        PresetBank junk = old;
+        junk.version = 7; // unknown: factory presets
+        Rig f(&junk);
+        CHECK(f.pedal.ui.Preset() == 0);
+        CHECK(f.CompOn());
+    });
+
     Test("preset mode: FS 1/FS 2 step through presets, wrapping", [&] {
         Rig r;
         r.Tap(1);
@@ -173,7 +201,11 @@ void RunPedalTests() {
         r.Tap(0);
         r.Tap(0);
         CHECK(r.pedal.ui.Preset() == PresetBank::kNumPresets - 1);
-        CHECK(!r.CompOn() && !r.EnvOn()); // P8: clean
+        CHECK(!r.CompOn() && !r.DriveOn() && !r.EnvOn()); // P16: empty
+        for (int i = PresetBank::kNumPresets - 1; i > 7; i--) r.Tap(0);
+        CHECK(r.pedal.ui.Preset() == 7);
+        CHECK(!r.CompOn() && r.DriveOn() && r.EnvOn()); // P8: fuzz into the envelope filter
+        CHECK(r.pedal.drive.GetParam(Drive::kChar) == 1.f);
     });
 
     Test("knobs edit in preset mode; changing preset discards the edit", [&] {
@@ -227,12 +259,15 @@ void RunPedalTests() {
         r.Tap(0);
         CHECK(!r.CompOn());
         CHECK(r.pedal.ui.Modified());
-        // Screen panel pages: Compressor 1/3, Env Filter 2/3 and 3/3 (Lows + Xover on pots).
-        CHECK(r.pedal.ui.Snapshot().pages == 3);
+        // Screen panel pages: Compressor 1/4, Drive 2/4, Env Filter 3/4 and 4/4 (Lows + Xover on pots).
+        CHECK(r.pedal.ui.Snapshot().pages == 4);
+        r.Tap(1);
+        CHECK(std::strcmp(r.pedal.ui.Snapshot().name, "Drive") == 0);
+        CHECK(r.pedal.ui.Snapshot().toggles[1].info.name == std::string("Lows")); // both switches on toggles
         r.Tap(1);
         CHECK(std::strcmp(r.pedal.ui.Snapshot().name, "Env Filter") == 0);
         r.Tap(1);
-        CHECK(r.pedal.ui.Snapshot().page == 2);
+        CHECK(r.pedal.ui.Snapshot().page == 3);
         CHECK(r.pedal.ui.Snapshot().pots[0].info.isSwitch); // Lows on pot 1
         r.Tap(1);
         CHECK(r.pedal.ui.Snapshot().page == 0); // wraps to the compressor

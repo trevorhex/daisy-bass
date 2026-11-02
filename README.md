@@ -5,8 +5,9 @@ A multi-effect bass pedal built on an [Electro-Smith Daisy Seed](https://daisy.a
 **So far:**
 - An **envelope filter** voiced for bass. It's a resonant filter that opens as you dig in, with an optional crossover that keeps everything below 150/250 Hz dry so the low end never thins out.
 - A **compressor** with Fast (peak) and Opto (smooth, two-stage release) modes, a Blend knob for parallel compression, and a detector high-pass so low notes don't pump.
+- An **overdrive/fuzz** with Grit and Fuzz characters, Tone and Mid controls, and a crossover that keeps the lows clean so the low end stays tight.
 - A **tuner** that mutes the output while you tune. It works down to a 5-string's low B.
-- **8 presets**, saved only when you choose to.
+- **16 presets**, saved only when you choose to.
 - A **desktop simulator** (`pedalsim`) that runs the real pedal code with live audio.
 - Groundwork for more effects: a common effect interface, a click-free effect chain, effect pages with knob pickup, and an OLED display.
 
@@ -19,6 +20,7 @@ dsp/        Sound. Pure C++, no hardware dependencies, shared by desktop and ped
   Effect.h            interface every effect implements (indexed 0..1 params)
   Chain.h             runs effects in series, click-free on/off per effect
   Compressor.h        the compressor
+  Drive.h             overdrive / fuzz
   EnvelopeFilter.h    the envelope filter
   Tuner.h             YIN pitch detector (25–500 Hz, ±1 cent)
   Svf.h, Crossover.h, EnvelopeFollower.h, Smoother.h   building blocks
@@ -90,8 +92,8 @@ The pedal has two modes. It powers up in **Preset mode** on the last preset you 
 - **Tuner:** any tap leaves it.
 - **Taps:** a tap registers when you lift your foot, because a press might still turn into a hold.
 - **Loading a preset** puts the pots on the first page of the first effect that's on in it.
-- **Factory presets:** P1 compressor, P2 envelope filter, P3 both, P4 smooth opto squeeze, P5 compressed quack (band-pass), P6 sweep down, P7–P8 clean.
-- **Chain order:** compressor → envelope filter. In Edit mode FS 2 steps through every page of every effect: Compressor (1 page), then Env Filter (2 pages on the screen panel).
+- **Factory presets:** P1 compressor, P2 envelope filter, P3 both, P4 smooth opto squeeze, P5 compressed quack (band-pass), P6 sweep down, P7 compressed grit drive, P8 fuzz into the envelope filter, P9–P16 empty (all effects off).
+- **Chain order:** compressor → drive → envelope filter. In Edit mode FS 2 steps through every page of every effect: Compressor (1 page), Drive (1 page), then Env Filter (2 pages on the screen panel).
 - **Screen divider:** fills with your playing (the effect's activity, e.g. the Env Filter's envelope).
 
 **Compressor** (one page on either panel)
@@ -107,7 +109,22 @@ The pedal has two modes. It powers up in **Preset mode** on the last preset you 
 | SW 1 | Mode: Fast (peak detector, grabs every pluck) / Opto (smooth, quick-then-slow release) |
 | SW 4 | Detect: Full / HPF (the detector ignores lows below ~100 Hz, so open low strings don't pump) |
 
-The screen's divider shows gain reduction (full width = 20 dB).
+The screen's divider shows gain reduction (full width = 20 dB). On the stock panel Detect is on SW 2.
+
+**Drive** (one page on either panel)
+
+| Control | Function |
+|---|---|
+| Pot 1 | Drive: 0 to +40 dB into the clipper. The output level is compensated, so this changes grit, not volume |
+| Pot 2 | Tone: low-pass on the driven signal, 500 Hz – 10 kHz |
+| Pot 3 | Mid: ±12 dB at 800 Hz on the driven signal, noon is flat |
+| Pot 4 | Xover: 50–400 Hz, where the clean lows end (Lows = Clean) |
+| Pot 5 | Blend: clean to driven. With Lows clean it blends only the upper band |
+| Pot 6 | Level: −18 to +18 dB, noon is unity |
+| SW 1 | Char: Grit (asymmetric soft clipping, warm) / Fuzz (+12 dB into a harder clipper, buzzy) |
+| SW 4 | Lows: Dirty (distort everything) / Clean (keep everything below Xover dry) |
+
+The clipping runs at twice the sample rate to keep aliasing down. The screen's divider shows how hard you're clipping. On the stock panel Lows is on SW 2 (and SW 3, SW 4 do nothing on this page).
 
 **Env Filter, screen panel (this build)**
 
@@ -168,9 +185,9 @@ Build flags:
 | `KNOB_CHECK=1` | Control diagnostic: prints every pot/switch over USB serial instead of processing audio |
 | `BOOT_SRAM=1` | Runs via Electro-Smith's bootloader, allowing programs of about 480 KB |
 
-**Memory budget:** the stock build uses 111 KB of the Seed's 128 KB internal flash (87%), so the next effect will probably need the bootloader. With the bootloader the screen build uses 137 KB of about 480 KB.
+**Memory budget:** the stock build uses 117 KB of the Seed's 128 KB internal flash (92%), so the next effect will probably need the bootloader. With the bootloader the screen build uses 144 KB of about 480 KB.
 
-**Presets on the pedal** live in the last 64 KB of the Seed's 8 MB QSPI flash (offset `0x7F0000`), clear of the bootloader's program area. First boot writes the factory presets there.
+**Presets on the pedal** live in the last 64 KB of the Seed's 8 MB QSPI flash (offset `0x7F0000`), clear of the bootloader's program area. First boot writes the factory presets there. Presets saved by an older firmware with 8 slots are kept, in P1–P8.
 
 **First flash:** run the control check and confirm every pot and switch:
 
